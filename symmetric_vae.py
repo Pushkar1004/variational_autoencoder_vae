@@ -21,6 +21,7 @@ class EncoderCoh1D(nn.Module):
     """
     def __init__(self, z_dim=20):
         super().__init__()
+        self.z_dim = z_dim
         self.conv1 = nn.Conv1d(1, 32, kernel_size=4, stride=2, padding=1)    # (N, 1,2500)-> (N, 32, 1250)
         self.conv2 = nn.Conv1d(32, 64, kernel_size=4, stride=2, padding=1)   # (N, 32, 1250)-> (N, 64, 625)
         self.conv3 = nn.Conv1d(64, 128, kernel_size=4, stride=2, padding=1)  # (N, 64, 625) -> (N, 128, 312)
@@ -49,6 +50,7 @@ class EncoderNui1D(nn.Module):
     """
     def __init__(self, z_dim=20):
         super().__init__()
+        self.z_dim = z_dim
         # Input shape: (N, 1, 2500)
         self.conv1 = nn.Conv1d(1, 32, kernel_size=4, stride=2, padding=1)    # (N, 1,2500)-> (N, 32, 1250)
         self.conv2 = nn.Conv1d(32, 64, kernel_size=4, stride=2, padding=1)   # (N, 32, 1250)-> (N, 64, 625)
@@ -80,6 +82,7 @@ class Decoder1D(nn.Module):
     """
     def __init__(self, z_dim=40):
         super().__init__()
+        self.z_dim = z_dim
         self.fc = nn.Linear(z_dim, 256 * 156)  # (N, z_dim) -> (N, 256*156) 
         self.deconv1 = nn.ConvTranspose1d(256, 128, kernel_size=4, stride=2, padding=1)  #(N,256*156) -> (N,128,312)
         self.deconv2 = nn.ConvTranspose1d(128, 64, kernel_size=4, stride=2, padding=1, output_padding=1)  # (N, 128,312) -> (N, 64, 625)
@@ -104,11 +107,11 @@ class SYMVAE1D(nn.Module):
       Performs precision-based accumulation of coherent latent variables.
       Reconstructs input from concatenated latent vectors.
     """
-    def __init__(self, z_dim=20):
+    def __init__(self, z_dim_coh=20, z_dim_nui = 20):
         super().__init__()
-        self.encoderCoh = EncoderCoh1D(z_dim)
-        self.encoderNui = EncoderNui1D(z_dim)
-        self.decoder = Decoder1D(z_dim*2)
+        self.encoderCoh = EncoderCoh1D(z_dim_coh)
+        self.encoderNui = EncoderNui1D(z_dim_nui)
+        self.decoder = Decoder1D(self.encoderCoh.z_dim + self.encoderNui.z_dim)
 
     def reparameterize(self, mu, logvar):
         """
@@ -207,4 +210,5 @@ def vae_loss_function(recon_x, x, mu, logvar, beta = 1.0):
     kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
     total_loss = recon_loss + beta * kl_loss
     return total_loss, recon_loss, kl_loss
+
 
