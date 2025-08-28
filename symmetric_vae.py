@@ -95,7 +95,7 @@ class Decoder1D(nn.Module):
         x = F.relu(self.deconv1(x))
         x = F.relu(self.deconv2(x))
         x = F.relu(self.deconv3(x))
-        x = (self.deconv4(x)) 
+        x = F.sigmoid((self.deconv4(x)))  # Use sigmoid when working whith min-max normalized data
         return x
 
         
@@ -181,7 +181,10 @@ class SYMVAE1D(nn.Module):
         # Reparameterize and decode
         z = self.reparameterize(mu, logvar)
         recon = self.decoder(z)
-        return recon, mu, logvar
+        return {
+            "recon": recon,
+            "mu": mu,
+            "logvar": logvar}
 
 
 def vae_loss_function(recon_x, x, mu, logvar, beta = 1.0):   
@@ -209,6 +212,111 @@ def vae_loss_function(recon_x, x, mu, logvar, beta = 1.0):
     # KL divergence (closed-form between q(z|x) ~ N(mu, sigma^2) and p(z) ~ N(0, I))    
     kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
     total_loss = recon_loss + beta * kl_loss
-    return total_loss, recon_loss, kl_loss
+    return {"total_loss": total_loss, "recon_mse" : recon_loss, "Dkl" :kl_loss}
 
+"""
+In the above version of the symmetric variational autoencoder (SymVAE), 
+we are restricted to pass only one group at a time during training. 
+But the goal is to train model with multiple groups in a single pass, 
+while still preserving group-wise disentanglement.
 
+    n (batch size): Number of groups processed in a single forward pass.
+    ntau: Number of instances per group (default = 20).
+    Input signal length: 2500.
+
+    This gives the input tensor shape: (n, ntau, 1, 2500)
+     
+PyTorch Conv1d layers accept only 3D input (batch_size, channels, length).  
+So, we need to reshape before passing data to the encoder.
+
+Reshape input from (n, ntau, 1, 2500) to (n * ntau, 1, 2500)  
+This allows Conv1d to process all group instances together
+
+The coherent encoder outputs (n * ntau, z_dim) 
+Here z_dim is the dimension of the coherent latent space.
+
+To accumulate coherent information within each group
+Reshape back to (n, ntau, z_dim)
+
+Then we do accumulation along `dim=1` (instances of same group), so that:
+    Coherent information is aggregated within each group.
+    Instances from different groups remain independent.
+
+This modification enables training on multiple groups simultaneously, 
+while ensuring that coherent information is only shared within groups 
+and not across different groups.
+"""
+
+class SYMVAE1D_MultiGroup(nn.Module):
+    """
+    Symmetric VAE for 1D signals with group-wise structure.
+    Each group of signals shares a "coherent" latent variable
+    (common across the group) and also has its own "nuisance"
+    latent variable (specific to each instance).
+    """
+
+    def __init__(self, z_dim_coh=20, z_dim_nui=20):
+        super().__init__()
+        self.encoderCoh = EncoderCoh1D(z_dim_coh)
+        self.encoderNui = EncoderNui1D(z_dim_nui)
+        self.decoder = Decoder1D(self.encoderCoh.z_dim + self.encoderNui.z_dim)
+
+    def reparameterize(self, mu, logvar):
+        std = torch.exp(0.5 * logvar)  # standard deviation
+        eps = torch.randn_like(std)    # random noise ~ N(0,1) same shape as std
+        return mu + eps * std          # sampled latent vector
+
+    def accumulate_Gaussians(self, mu, logvar):
+        var = torch.exp(logvar)
+        precision = 1 / var
+        
+        c_pre = precision.sum(dim=1, keepdim=True)          # total precision
+        c_var = 1 / c_pre                                   # accumulated variance
+        muXpre = torch.sum(mu * precision, dim=1, keepdim=True)
+        c_mu = muXpre / c_pre                               # accumulated mean
+        c_logvar = torch.log(c_var)
+        
+        return c_mu, c_logvar
+
+    def forward(self, x):
+
+        batch_size, group_size, c, nt = x.size()
+        
+        # Flatten group dimension to pass each instance independently to encoders
+        x_ = x.view(batch_size * group_size, c, nt)
+        
+        # Encode latent means and log-variances
+        mu_coh, logvar_coh = self.encoderCoh(x_)
+        mu_nui, logvar_nui = self.encoderNui(x_)
+        
+        # Reshape back into groups for coherent aggregation
+        mu_coh_ = mu_coh.view(batch_size, group_size, self.encoderCoh.z_dim)
+        logvar_coh_ = logvar_coh.view(batch_size, group_size, self.encoderCoh.z_dim)
+        
+        # Accumulate coherent latent variables across group instances
+        c_mu_coh, c_logvar_coh = self.accumulate_Gaussians(mu_coh_, logvar_coh_)
+        
+        # Expand coherent latent variables so each instance in a group has shared coherent space 
+        c_mu_coh_expanded = c_mu_coh.repeat(1, group_size, 1)
+        c_logvar_coh_expanded = c_logvar_coh.repeat(1, group_size, 1)
+        
+        # Flatten back to match nuisance space dimension for concatenation
+        c_mu_coh = c_mu_coh_expanded.view(batch_size * group_size, self.encoderCoh.z_dim)
+        c_logvar_coh = c_logvar_coh_expanded.view(batch_size * group_size, self.encoderCoh.z_dim)
+        
+        # Concatenate coherent + nuisance latent variables for each instance
+        mu = torch.cat([c_mu_coh, mu_nui], dim=1)
+        logvar = torch.cat([c_logvar_coh, logvar_nui], dim=1)
+        
+        # Reparameterization
+        z = self.reparameterize(mu, logvar)
+        
+        # Decode back to input space
+        recon = self.decoder(z)
+        recon = recon.view(batch_size, group_size, c, nt)
+        
+        return {
+            "recon": recon,   # reconstructed signal
+            "mu": mu,         # latent space mean
+            "logvar": logvar  # latent space log(variance)
+        }
