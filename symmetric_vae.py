@@ -2,116 +2,141 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-"""
-Input format:
-  N -> Batch size (instances from a single group, since we want to accumulate information from events of the same group).
-  Signal length -> 2500 (1D signal to encode).
-  Channels -> 1.
-  Latent space dimension -> Z.
-
-Thus, input shape = (N, 1, 2500).
-"""
 
 # Encoder for Coherent Information
-class EncoderCoh1D(nn.Module):
+class conv_EncoderCoh1D(nn.Module):
     """
     Encodes coherent information from each instance.
     This information is shared across all events in the group.
     Precision-based accumulation of the outputs (mu, logvar) is done later.
+    nt = length of the sample
     """
-    def __init__(self, z_dim=20):
+    def __init__(self, z_dim=20, nt = 400):
         super().__init__()
         self.z_dim = z_dim
-        self.conv1 = nn.Conv1d(1, 32, kernel_size=4, stride=2, padding=1)    # (N, 1,2500)-> (N, 32, 1250)
-        self.conv2 = nn.Conv1d(32, 64, kernel_size=4, stride=2, padding=1)   # (N, 32, 1250)-> (N, 64, 625)
-        self.conv3 = nn.Conv1d(64, 128, kernel_size=4, stride=2, padding=1)  # (N, 64, 625) -> (N, 128, 312)
-        self.conv4 = nn.Conv1d(128,256, kernel_size = 4, stride = 2, padding=1) # (N, 128, 312) -> (N, 256,156)
-        self._flatten_dim = 256 * 156 # _flatten_dim: dimension of the bottleneck
-        self.fc_mu = nn.Linear(self._flatten_dim, z_dim) # returns mean of coherent latent distribution
-        self.fc_logvar = nn.Linear(self._flatten_dim, z_dim) # returns log-variance of coherent latent distribution
+        self.nt = nt
 
+        self.conv_layers = nn.Sequential(
+            nn.Conv1d(1, 5, kernel_size=50,padding="same"),    
+            nn.ReLU(),
+            nn.Conv1d(5, 10, kernel_size=20, padding="same"),   
+            nn.ReLU(),   
+            nn.AvgPool1d(kernel_size=4),                       
+            nn.Conv1d(10, 50, kernel_size=5, padding="same"), 
+            nn.ReLU(),
+            nn.Conv1d(50,40, kernel_size = 5, padding="same"), 
+            nn.ReLU(),                                         
+            nn.AvgPool1d(kernel_size=4),
+        )
+
+        with torch.no_grad():
+            dummy_input = torch.zeros(1,1,self.nt)
+            dummy_out = self.conv_layers(dummy_input)
+            self._flatten_dim = dummy_out.numel()
+        
+        self.last_layer = nn.Linear(self._flatten_dim, self.z_dim)
+        self.fc_mu = nn.Linear(self.z_dim, self.z_dim) # returns mean of coherent latent distribution
+        self.fc_logvar = nn.Linear(self.z_dim, self.z_dim) # returns log-variance of coherent latent distribution
 
     def forward(self, x):
-        x = F.relu(self.conv1(x))
-        x = F.relu(self.conv2(x))
-        x = F.relu(self.conv3(x))
-        x = F.relu(self.conv4(x))
-        x = x.view(x.size(0), -1)  # flatten (N, 256, 156) -> (N, 256*156)
-        mu_coh = self.fc_mu(x)         # (N,z_dim) 
-        logvar_coh = self.fc_logvar(x) # (N, z_dim) 
-        # logvar = torch.clamp(logvar, min=-10, max=10)
+        x = self.conv_layers(x)
+        x = x.view(x.size(0), -1)  
+        x = self.last_layer(x)
+        mu_coh = self.fc_mu(x)         
+        logvar_coh = self.fc_logvar(x) 
         return mu_coh, logvar_coh
 
+
 # Encoder for Nuisance Information
-class EncoderNui1D(nn.Module):
+class conv_EncoderNui1D(nn.Module):
     """
     Encodes nuisance information for each instance.
     Unlike coherent information, nuisance information is unique to each event in the group.
     """
-    def __init__(self, z_dim=20):
+    def __init__(self, z_dim=20, nt = 400):
         super().__init__()
         self.z_dim = z_dim
-        # Input shape: (N, 1, 2500)
-        self.conv1 = nn.Conv1d(1, 32, kernel_size=4, stride=2, padding=1)    # (N, 1,2500)-> (N, 32, 1250)
-        self.conv2 = nn.Conv1d(32, 64, kernel_size=4, stride=2, padding=1)   # (N, 32, 1250)-> (N, 64, 625)
-        self.conv3 = nn.Conv1d(64, 128, kernel_size=4, stride=2, padding=1)  # (N, 64, 625) -> (N, 128, 312)
-        self.conv4 = nn.Conv1d(128,256, kernel_size = 4, stride = 2, padding=1) # (N, 128, 312) -> (N, 256,156)
-        self._flatten_dim = 256 * 156 # _flatten_dim: dimension of the bottleneck
-        self.fc_mu = nn.Linear(self._flatten_dim, z_dim) # returns mean of nuisance latent distribution
-        self.fc_logvar = nn.Linear(self._flatten_dim, z_dim) # returns log-variance of nuisance latent distribution
+        self.nt = nt
 
+        self.conv_layers = nn.Sequential(
+            nn.Conv1d(1, 5, kernel_size=50,padding="same"),    
+            nn.ReLU(),
+            nn.Conv1d(5, 10, kernel_size=20, padding="same"), 
+            nn.ReLU(),   
+            nn.AvgPool1d(kernel_size=4),
+            nn.Conv1d(10, 50, kernel_size=5, padding="same"),  
+            nn.ReLU(),
+            nn.Conv1d(50,40, kernel_size = 5, padding="same"), 
+            nn.ReLU(),
+            nn.AvgPool1d(kernel_size=4),
+        )
+        
+        with torch.no_grad():
+            dummy_input = torch.zeros(1,1,self.nt)
+            dummy_out = self.conv_layers(dummy_input)
+            self._flatten_dim = dummy_out.numel()
+        
+        self.last_layer = nn.Linear(self._flatten_dim, self.z_dim)
+        self.fc_mu = nn.Linear(self.z_dim, self.z_dim) # returns mean of coherent latent distribution
+        self.fc_logvar = nn.Linear(self.z_dim, self.z_dim) # returns log-variance of coherent latent distribution
+        
     def forward(self, x):
-        x = F.relu(self.conv1(x))
-        x = F.relu(self.conv2(x))
-        x = F.relu(self.conv3(x))
-        x = F.relu(self.conv4(x))
-        x = x.view(x.size(0), -1)  # flatten (N, 256, 156) -> (N, 256*156)
-        mu_nui = self.fc_mu(x)         # (N, z_dim)
-        logvar_nui = self.fc_logvar(x) # (N, z_dim)
-        # logvar = torch.clamp(logvar, min=-10, max=10)
-        return mu_nui, logvar_nui
+        x = self.conv_layers(x)
+        x = x.view(x.size(0), -1)  
+        x = self.last_layer(x)
+        mu_coh = self.fc_mu(x)        
+        logvar_coh = self.fc_logvar(x) 
+        return mu_coh, logvar_coh
 
-
+        
 # Decoder
-class Decoder1D(nn.Module):
+class conv_Decoder1D(nn.Module):
     """
     Reconstructs the original signal from the latent representation.
     Input:
       Latent vector formed by concatenating coherent (shared) and nuisance (instance-specific) latent variables.
       Decoder input dimension = z_dim_coherent + z_dim_nuisance
     """
-    def __init__(self, z_dim=40):
+    def __init__(self, z_dim=20, nt = 400):
         super().__init__()
         self.z_dim = z_dim
-        self.fc = nn.Linear(z_dim, 256 * 156)  # (N, z_dim) -> (N, 256*156) 
-        self.deconv1 = nn.ConvTranspose1d(256, 128, kernel_size=4, stride=2, padding=1)  #(N,256*156) -> (N,128,312)
-        self.deconv2 = nn.ConvTranspose1d(128, 64, kernel_size=4, stride=2, padding=1, output_padding=1)  # (N, 128,312) -> (N, 64, 625)
-        self.deconv3 = nn.ConvTranspose1d(64, 32, kernel_size=4, stride=2, padding=1) #(N,64,625) -> (N,32,1250)
-        self.deconv4 = nn.ConvTranspose1d(32, 1, kernel_size=4, stride=2, padding=1)  #(N, 32,1250) -> (N,1,2500)
+        self.nt = nt
+        self.fc = nn.Linear(z_dim, self.nt)
+        self.fc2 = nn.Linear(self.nt, self.nt)
+        self.conv1 = nn.Conv1d(1, 40, kernel_size=50,padding="same")
+        self.conv2 = nn.Conv1d(40,10, kernel_size = 20, padding = "same")
+        self.conv3 = nn.Conv1d(10,10, kernel_size = 20, padding = "same")
+        self.conv4 = nn.Conv1d(10,5, kernel_size = 5, padding = "same")
+        self.conv5 = nn.Conv1d(5,1, kernel_size = 5, padding = "same")
 
     def forward(self, z):
         x = self.fc(z)
-        x = x.view(x.size(0), 256, 156)  # reshape (N, 256*156) -> (N, 256, 156)
-        x = F.relu(self.deconv1(x))
-        x = F.relu(self.deconv2(x))
-        x = F.relu(self.deconv3(x))
-        x = F.sigmoid((self.deconv4(x)))  # Use sigmoid when working whith min-max normalized data
-        return x
+        x = self.fc2(x)
+        x = x.view(x.size(0), 1, x.size(1))      
+        x = F.relu(self.conv1(x))                          
+        x = F.relu(self.conv2(x))              
+        x = F.relu(self.conv3(x))           
+        x = F.relu(self.conv4(x))           
+        x = (self.conv5(x))                      
 
+        return x  
         
 
-class SYMVAE1D(nn.Module):
+class conv_SYMVAE1D(nn.Module):
     """
     Symmetric Variational Autoencoder:
       Splits latent space into coherent (shared across group) and nuisance (instance-specific).
       Performs precision-based accumulation of coherent latent variables.
       Reconstructs input from concatenated latent vectors.
     """
-    def __init__(self, z_dim_coh=20, z_dim_nui = 20):
+    def __init__(self, z_dim_coh=20, z_dim_nui = 20, nt = 400):
         super().__init__()
-        self.encoderCoh = EncoderCoh1D(z_dim_coh)
-        self.encoderNui = EncoderNui1D(z_dim_nui)
-        self.decoder = Decoder1D(self.encoderCoh.z_dim + self.encoderNui.z_dim)
+        self.nt = nt
+        self.z_dim_coh = z_dim_coh
+        self.z_dim_nui = z_dim_nui
+        self.encoderCoh = conv_EncoderCoh1D(z_dim_coh, nt =  self.nt)
+        self.encoderNui = conv_EncoderNui1D(z_dim_nui, nt = self.nt)
+        self.decoder = conv_Decoder1D(self.z_dim_coh + self.z_dim_nui ,nt = self.nt)
 
     def reparameterize(self, mu, logvar):
         """
@@ -168,13 +193,14 @@ class SYMVAE1D(nn.Module):
 
     def forward(self, x):
         # Encode
+        batch_size, c, nt = x.size()
         mu_coh, logvar_coh = self.encoderCoh(x)
         mu_nui, logvar_nui = self.encoderNui(x)
         # Accumulate coherent latent variables across group
         c_mu_coh, c_logvar_coh = self.accumulate_Gaussians(mu_coh, logvar_coh)
         # Broadcast shared coherent latent vars across all events in group
-        c_mu_expanded = c_mu_coh.expand(x.shape[0], 20)  
-        c_logvar_expanded = c_logvar_coh.expand(x.shape[0], 20) 
+        c_mu_expanded = c_mu_coh.expand(x.shape[0], self.z_dim_coh)  
+        c_logvar_expanded = c_logvar_coh.expand(x.shape[0], self.z_dim_coh) 
         # Concatenate nuisance (instance-specific) with coherent (shared) latent vars
         mu = torch.cat((mu_nui, c_mu_expanded), dim=1)
         logvar = torch.cat((logvar_nui, c_logvar_expanded), dim=1)
@@ -247,19 +273,16 @@ while ensuring that coherent information is only shared within groups
 and not across different groups.
 """
 
-class SYMVAE1D_MultiGroup(nn.Module):
-    """
-    Symmetric VAE for 1D signals with group-wise structure.
-    Each group of signals shares a "coherent" latent variable
-    (common across the group) and also has its own "nuisance"
-    latent variable (specific to each instance).
-    """
+class conv_SYMVAE1D_MultiGroup(nn.Module):
 
-    def __init__(self, z_dim_coh=20, z_dim_nui=20):
+    def __init__(self, z_dim_coh=20, z_dim_nui=20, nt = 400):
         super().__init__()
-        self.encoderCoh = EncoderCoh1D(z_dim_coh)
-        self.encoderNui = EncoderNui1D(z_dim_nui)
-        self.decoder = Decoder1D(self.encoderCoh.z_dim + self.encoderNui.z_dim)
+        self.z_dim_coh = z_dim_coh
+        self.z_dim_nui = z_dim_nui
+        self.nt = nt
+        self.encoderCoh = conv_EncoderCoh1D(self.z_dim_coh, nt = self.nt)
+        self.encoderNui = conv_EncoderNui1D(self.z_dim_nui, nt = self.nt)
+        self.decoder = conv_Decoder1D(self.encoderCoh.z_dim + self.encoderNui.z_dim, nt = self.nt)
 
     def reparameterize(self, mu, logvar):
         std = torch.exp(0.5 * logvar)  # standard deviation
@@ -317,6 +340,12 @@ class SYMVAE1D_MultiGroup(nn.Module):
         
         return {
             "recon": recon,   # reconstructed signal
-            "mu": mu,         # latent space mean
-            "logvar": logvar  # latent space log(variance)
+            "mu": mu,         # latent space mean (concatenated nuisance code and shared coherent code)
+            "logvar": logvar,  # latent space log(variance) (concatenated nuisance code and shared coherent code)
+            "c_mu_coh": c_mu_coh_expanded, # shared coherent space mean
+        "c_logvar_coh": c_logvar_coh_expanded, # shared coherent space logvar
+            "mu_coh":mu_coh, # indivisual coherent space mean
+            "logvar_coh":logvar_coh,  # indivisual coherent space log(var)
+            "mu_nui":mu_nui, # nuisance space mean 
+            "logvar_nui":logvar_nui # nuisance space log(var)
         }
