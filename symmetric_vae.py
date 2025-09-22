@@ -234,9 +234,9 @@ def vae_loss_function(recon_x, x, mu, logvar, beta = 1.0):
         kl_loss -> torch.Tensor, The KL divergence.
     """
     # Reconstruction loss (Mean Squared Error)
-    recon_loss = F.mse_loss(recon_x, x, reduction="sum")
+    recon_loss = F.mse_loss(recon_x, x, reduction="mean")
     # KL divergence (closed-form between q(z|x) ~ N(mu, sigma^2) and p(z) ~ N(0, I))    
-    kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+    kl_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
     total_loss = recon_loss + beta * kl_loss
     return {"total_loss": total_loss, "recon_mse" : recon_loss, "Dkl" :kl_loss}
 
